@@ -11,14 +11,13 @@ namespace TelloLib
     public class Tello
     {
         private static UdpUser client;
-//        private static float[] joyAxis = new float[] { 0, 0, 0, 0, 0 };
         private static DateTime lastMessageTime;//for connection timeouts.
 
         public static FlyData state = new FlyData();
         private static int wifiStrength=0;
         public static bool connected = false;
 
-        public delegate void updateDeligate(FlyData state);
+        public delegate void updateDeligate(int cmdId);
         public static event updateDeligate onUpdate;
         public delegate void connectionDeligate(ConnectionState newState);
         public static event connectionDeligate onConnection;
@@ -27,6 +26,7 @@ namespace TelloLib
 
         public static string picPath;//todo redo this. 
         public static string picFilePath;//todo redo this. 
+        public static int picMode = 0;//pic or vid aspect ratio.
 
         public static int iFrameRate = 5;//How often to ask for iFrames in 50ms. Ie 2=10x 5=4x 10=2xSecond 5 = 4xSecond
 
@@ -36,7 +36,9 @@ namespace TelloLib
         {
             Disconnected,
             Connecting,
-            Connected
+            Connected,
+            Paused,//used to keep from disconnecting when starved for input.
+            UnPausing//Transition. Never stays in this state. 
         }
         public static ConnectionState connectionState = ConnectionState.Disconnected;
 
@@ -128,6 +130,19 @@ namespace TelloLib
 
             Tello.queryAttAngle();//refresh
         }
+        public static void setEis(int value)
+        {
+            //                                          crc    typ  cmdL  cmdH  seqL  seqH  valL  crc   crc
+            var packet = new byte[] { 0xcc, 0x60, 0x00, 0x27, 0x68, 0x24, 0x00, 0x09, 0x00, 0x00, 0x5b, 0xc5 };
+
+            //payload
+            packet[9] = (byte)(value & 0xff);
+
+            setPacketSequence(packet);
+            setPacketCRCs(packet);
+
+            client.Send(packet);
+        }
         public static void doFlip(int dir)
         {
             //                                          crc    typ  cmdL  cmdH  seqL  seqH  dirL  crc   crc
@@ -181,6 +196,32 @@ namespace TelloLib
 
             client.Send(packet);
         }
+        public static void setVideoDynRate(int rate)
+        {
+            //                                          crc    typ  cmdL  cmdH  seqL  seqH  rateL  crc   crc
+            var packet = new byte[] { 0xcc, 0x60, 0x00, 0x27, 0x68, 0x21, 0x00, 0x09, 0x00, 0x00, 0x5b, 0xc5 };
+
+            //payload
+            packet[9] = (byte)rate;
+
+            setPacketSequence(packet);
+            setPacketCRCs(packet);
+
+            client.Send(packet);
+        }
+        public static void setVideoRecord(int n)
+        {
+            //                                          crc    typ  cmdL  cmdH  seqL  seqH  nL  crc   crc
+            var packet = new byte[] { 0xcc, 0x60, 0x00, 0x27, 0x68, 0x32, 0x00, 0x09, 0x00, 0x00, 0x5b, 0xc5 };
+
+            //payload
+            packet[9] = (byte)n;
+
+            setPacketSequence(packet);
+            setPacketCRCs(packet);
+
+            client.Send(packet);
+        }
         /*TELLO_CMD_SWITCH_PICTURE_VIDEO
 	    49 0x31
 	    0x68
@@ -191,6 +232,8 @@ namespace TelloLib
         {
             //                                          crc    typ  cmdL  cmdH  seqL  seqH  modL  crc   crc
             var packet = new byte[] { 0xcc, 0x60, 0x00, 0x27, 0x68, 0x31, 0x00, 0x00, 0x00, 0x00, 0x5b, 0xc5 };
+
+            picMode = mode;
 
             //payload
             packet[9] = (byte)(mode & 0xff);
@@ -271,6 +314,57 @@ namespace TelloLib
 
             client.Send(packet);
         }
+
+        public static void sendAckLog(short cmd,ushort id)
+        {
+            //                                          crc    typ  cmdL  cmdH  seqL  seqH  unk   idL   idH   crc   crc
+            var packet = new byte[] { 0xcc, 0x70, 0x00, 0x27, 0x50, 0x50, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0xc5 };
+
+            var ba = BitConverter.GetBytes(cmd);
+            packet[5] = ba[0];
+            packet[6] = ba[1];
+
+            ba = BitConverter.GetBytes(id);
+            packet[10] = ba[0];
+            packet[11] = ba[1];
+
+            setPacketSequence(packet);
+            setPacketCRCs(packet);
+
+            client.Send(packet);
+        }
+
+        //this might not be working right 
+        public static void sendAckLogConfig(short cmd, ushort id,int n2)
+        {
+            //                                          crc    typ  cmdL  cmdH  seqL  seqH  unk   idL   idH  n2L   n2H  n2L   n2H   crc   crc
+            var packet = new byte[] { 0xcc, 0xd0, 0x00, 0x27, 0x88, 0x50, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,0x00, 0x00,0x00, 0x00, 0x5b, 0xc5 };
+
+            var ba = BitConverter.GetBytes(cmd);
+            packet[5] = ba[0];
+            packet[6] = ba[1];
+
+            ba = BitConverter.GetBytes(id);
+            packet[10] = ba[0];
+            packet[11] = ba[1];
+
+            packet[12] = ((byte)(int)(0xFF & n2));
+            packet[13] = ((byte)(int)(n2 >> 8 & 0xFF));
+            packet[14] = ((byte)(int)(n2 >> 16 & 0xFF));
+            packet[15] = ((byte)(int)(n2 >> 24 & 0xFF));
+
+            //ba = BitConverter.GetBytes(n2);
+            //packet[12] = ba[0];
+            //packet[13] = ba[1];
+            //packet[14] = ba[2];
+            //packet[15] = ba[3];
+
+            setPacketSequence(packet);
+            setPacketCRCs(packet);
+
+            client.Send(packet);
+        }
+
         private static void setPacketSequence(byte[] packet)
         {
             packet[7] = (byte)(sequence & 0xff);
@@ -324,12 +418,32 @@ namespace TelloLib
             client.Send(connectPacket);
         }
 
+        //Pause connections. Used by aTello when app paused.
+        public static void connectionSetPause(bool bPause)
+        {
+            //NOTE only pause if connected and only unpause (connect) when paused.
+            if (bPause && connectionState == ConnectionState.Connected)
+            {
+                connectionState = ConnectionState.Paused;
+                //send event
+                onConnection(connectionState);
+            }
+            else if (bPause ==false && connectionState == ConnectionState.Paused)
+            {
+                //NOTE:send unpause and not connection event
+                onConnection(ConnectionState.UnPausing);
+
+                connectionState = ConnectionState.Connected;
+            }
+        }
+
         private static byte[] picbuffer=new byte[3000*1024];
         private static bool[] picChunkState;
         private static bool[] picPieceState;
         private static UInt32 picBytesRecived;
         private static UInt32 picBytesExpected;
         private static UInt32 picExtraPackets;
+        public static bool picDownloading;
         private static int maxPieceNum = 0;
         private static void startListeners()
         {
@@ -341,7 +455,7 @@ namespace TelloLib
             {
                 while (true)
                 {
-                    try
+                   try
                     {
                         if (token.IsCancellationRequested)//handle canceling thread.
                             break;
@@ -375,21 +489,38 @@ namespace TelloLib
                         if (cmdId == 86)//state command
                         {
                             //update
-                            var newState = new FlyData();
-                            newState.set(received.bytes.Skip(9).ToArray());
+                            state.set(received.bytes.Skip(9).ToArray());
+
+                        }
+                        if (cmdId == 4176)//log header
+                        {
+                            //just ack.
+                            var id = BitConverter.ToUInt16(received.bytes, 9);
+                            sendAckLog((short)cmdId, id);
+                            //Console.WriteLine(id);
+                        }
+                        if (cmdId == 4177)//log data
+                        {
                             try
                             {
-                                //fire update event.
-                                onUpdate(newState);
-                            }
-                            catch (Exception ex)
+                                state.parseLog(received.bytes.Skip(10).ToArray());
+                            }catch (Exception pex)
                             {
-                                //Fixed. Update errors do not cause disconnect.
-                                Console.WriteLine("onUpdate error:" + ex.Message);
-                                //break;
+                                Console.WriteLine("parseLog error:" + pex.Message);
                             }
-                            //update current state.
-                            state = newState;
+                        }
+                        if (cmdId == 4178)//log config
+                        {
+                            //todo. this doesnt seem to be working.
+
+                            //var id = BitConverter.ToUInt16(received.bytes, 9);
+                            //var n2 = BitConverter.ToInt32(received.bytes, 11);
+                            //sendAckLogConfig((short)cmdId, id,n2);
+
+                            //var dataStr = BitConverter.ToString(received.bytes.Skip(14).Take(10).ToArray()).Replace("-", " ")/*+"  "+pos*/;
+
+
+                            //Console.WriteLine(dataStr);
                         }
                         if (cmdId == 4185)//att angle response
                         {
@@ -417,7 +548,7 @@ namespace TelloLib
                         if (cmdId == 53)//light str command
                         {
                         }
-                        if (cmdId == 98)
+                        if (cmdId == 98)//start jpeg.
                         {
                             picFilePath = picPath + DateTime.Now.ToString("yyyy-dd-M--HH-mm-ss") + ".jpg";
 
@@ -434,6 +565,8 @@ namespace TelloLib
                             picChunkState = new bool[(picBytesExpected/1024)+1]; //calc based on size. 
                             picPieceState = new bool[(picChunkState.Length / 8)+1];
                             picExtraPackets = 0;//for debugging.
+                            picDownloading = true;
+
                             sendAckFileSize();
                         }
                         if(cmdId == 99)//jpeg
@@ -477,11 +610,20 @@ namespace TelloLib
                                 }
                                 if (picFilePath != null && picBytesRecived >= picBytesExpected)
                                 {
-
+                                    picDownloading = false;
 
                                     sendAckFilePiece(1, 0, (UInt32)maxPieceNum);//todo. Double check this. finalize
 
                                     sendAckFileDone((int)picBytesExpected);
+
+                                    //HACK.
+                                    //Send file done cmdId to the update listener so it knows the picture is done. 
+                                    //hack.
+                                    onUpdate(100);
+                                    //hack.
+                                    //This is a hack because it is faking a message. And not a very good fake.
+                                    //HACK.
+
                                     Console.WriteLine("\nDONE PN:" + pieceNum + " max: " + maxPieceNum);
 
                                     //Save raw data minus sequence.
@@ -505,11 +647,26 @@ namespace TelloLib
                         {
 
                         }
+
+                        //send command to listeners. 
+                        try
+                        {
+                            //fire update event.
+                            onUpdate(cmdId);
+                        }
+                        catch (Exception ex)
+                        {
+                            //Fixed. Update errors do not cause disconnect.
+                            Console.WriteLine("onUpdate error:" + ex.Message);
+                            //break;
+                        }
+
+
                     }
 
-                    catch (Exception ex)
+                    catch (Exception eex)
                     {
-                        Console.WriteLine("Receive thread error:" + ex.Message);
+                        Console.WriteLine("Receive thread error:" + eex.Message);
                         disconnect();
                         break;
                     }
@@ -548,7 +705,7 @@ namespace TelloLib
                         Console.WriteLine("Video receive thread error:" + ex.Message);
                         
                         //dont disconnect();
-                        break;
+//                        break;
                     }
                 }
             }, token);
@@ -573,19 +730,36 @@ namespace TelloLib
                     {
                         if (token.IsCancellationRequested)
                             break;
-                        sendControllerUpdate();
 
-                        tick++;
-                        if ((tick % iFrameRate) == 0)
-                            requestIframe();
+                        if (connectionState == ConnectionState.Connected)//only send if not paused
+                        {
+                            sendControllerUpdate();
 
+                            tick++;
+                            if ((tick % iFrameRate) == 0)
+                                requestIframe();
+                        }
                         Thread.Sleep(50);//Often enough?
                     }
                     catch (Exception ex)
                     {
                         Console.WriteLine("Heatbeat error:" + ex.Message);
-                        disconnect();
-                        break;
+                        if (ex.Message.StartsWith("Access denied") //Denied means app paused
+                            && connectionState != ConnectionState.Paused)
+                        {
+                            //Can this happen?
+                            Console.WriteLine("Heatbeat: access denied and not paused:" + ex.Message);
+
+                            disconnect();
+                            break;
+                        }
+
+
+                        if (!ex.Message.StartsWith("Access denied"))//Denied means app paused
+                        {
+                            disconnect();
+                            break;
+                        }
                     }
                 }
             }, token);
@@ -613,11 +787,14 @@ namespace TelloLib
                             case ConnectionState.Connecting:
                             case ConnectionState.Connected:
                                 var elapsed = DateTime.Now - lastMessageTime;
-                                if (elapsed.Seconds > 1)
+                                if (elapsed.Seconds > 2)//1 second timeout.
                                 {
                                     Console.WriteLine("Connection timeout :");
                                     disconnect();
                                 }
+                                break;
+                            case ConnectionState.Paused:
+                                lastMessageTime = DateTime.Now;//reset timeout so we have time to recover if enabled. 
                                 break;
                         }
                         Thread.Sleep(500);
@@ -631,17 +808,23 @@ namespace TelloLib
 
         }
 
-        public struct ControllerState
+        public class ControllerState
         {
             public float rx, ry, lx, ly;
             public int speed;
+            public double deadBand = 0.15;
             public void setAxis(float lx, float ly,float rx, float ry)
             {
-                var deadBand = 0.15f;
-                this.rx = Math.Abs(rx) < deadBand ? 0.0f : rx;
-                this.ry = Math.Abs(ry) < deadBand ? 0.0f : ry;
-                this.lx = Math.Abs(lx) < deadBand ? 0.0f : lx;
-                this.ly = Math.Abs(ly) < deadBand ? 0.0f : ly;
+                //var deadBand = 0.15f;
+                //this.rx = Math.Abs(rx) < deadBand ? 0.0f : rx;
+                //this.ry = Math.Abs(ry) < deadBand ? 0.0f : ry;
+                //this.lx = Math.Abs(lx) < deadBand ? 0.0f : lx;
+                //this.ly = Math.Abs(ly) < deadBand ? 0.0f : ly;
+
+                this.rx = rx;
+                this.ry = ry;
+                this.lx = lx;
+                this.ly = ly;
 
                 //Console.WriteLine(rx + " " + ry + " " + lx + " " + ly + " SP:" + speed);
             }
@@ -653,6 +836,12 @@ namespace TelloLib
             }
         }
         public static ControllerState controllerState=new ControllerState();
+        public static ControllerState autoPilotControllerState = new ControllerState();
+
+        public static float Clamp(float value, float min, float max)
+        {
+            return (value < min) ? min : (value > max) ? max : value;
+        }
 
         public static void sendControllerUpdate()
         {
@@ -666,9 +855,19 @@ namespace TelloLib
             //var limit = 1.0f;//Slow down while testing.
             //rx = rx * limit;
             //ry = ry * limit;
-
+            var rx =controllerState.rx;
+            var ry =controllerState.ry;
+            var lx =controllerState.lx;
+            var ly =controllerState.ly;
+            if (true)//Combine autopilot sticks.
+            {
+                rx = Clamp(rx + autoPilotControllerState.rx, -1.0f, 1.0f);
+                ry = Clamp(ry + autoPilotControllerState.ry, -1.0f, 1.0f);
+                lx = Clamp(lx + autoPilotControllerState.lx, -1.0f, 1.0f);
+                ly = Clamp(ly + autoPilotControllerState.ly, -1.0f, 1.0f);
+            }
             //Console.WriteLine(controllerState.rx + " " + controllerState.ry + " " + controllerState.lx + " " + controllerState.ly + " SP:"+boost);
-            var packet = createJoyPacket(controllerState.rx, controllerState.ry, controllerState.lx, controllerState.ly, boost);
+            var packet = createJoyPacket(rx, ry, lx, ly, boost);
             try
             {
                 client.Send(packet);
@@ -772,6 +971,25 @@ namespace TelloLib
             public int wifiStrength;// = 100;//
             public bool windState;//
 
+            //From log
+            public float velX;
+            public float velY;
+            public float velZ;
+
+            public float posX;
+            public float posY;
+            public float posZ;
+            public float posUncertainty;
+
+            public float velN;
+            public float velE;
+            public float velD;
+
+            public float quatX;
+            public float quatY;
+            public float quatZ;
+            public float quatW;
+
             public void set(byte[] data)
             {
                 var index = 0;
@@ -825,6 +1043,115 @@ namespace TelloLib
                 wifiStrength = Tello.wifiStrength;//Wifi str comes in a cmd.
             }
 
+            //Parse some of the interesting info from the tello log stream
+            public void parseLog(byte[] data)
+            {
+                int pos = 0; 
+
+                //A packet can contain more than one record.
+                while (pos < data.Length-2)//-2 for CRC bytes at end of packet.
+                {
+                    if (data[pos] != 'U')//Check magic byte
+                    {
+                        //Console.WriteLine("PARSE ERROR!!!");
+                        break;
+                    }
+                    var len = data[pos + 1];
+                    if (data[pos + 2] != 0)//Should always be zero (so far)
+                    {
+                        //Console.WriteLine("SIZE OVERFLOW!!!");
+                        break;
+                    }
+                    var crc = data[pos + 3];
+                    var id = BitConverter.ToUInt16(data, pos + 4);
+                    var xorBuf = new byte[256];
+                    byte xorValue = data[pos + 6];
+                    switch (id)
+                    {
+                        case 0x1d://29 new_mvo
+                            for (var i = 0; i < len; i++)//Decrypt payload.
+                                xorBuf[i] = (byte)(data[pos + i] ^ xorValue);
+                            var index = 10;//start of the velocity and pos data.
+                            var observationCount = BitConverter.ToUInt16(xorBuf, index); index += 2;
+                            velX = BitConverter.ToInt16(xorBuf, index); index += 2;
+                            velY = BitConverter.ToInt16(xorBuf, index); index += 2;
+                            velZ = BitConverter.ToInt16(xorBuf, index); index += 2;
+                            posX = BitConverter.ToSingle(xorBuf, index); index += 4;
+                            posY = BitConverter.ToSingle(xorBuf, index); index += 4;
+                            posZ = BitConverter.ToSingle(xorBuf, index); index += 4;
+                            posUncertainty = BitConverter.ToSingle(xorBuf, index)*10000.0f; index += 4;
+                            //Console.WriteLine(observationCount + " " + posX + " " + posY + " " + posZ);
+                            break;
+                        case 0x0800://2048 imu
+                            for (var i = 0; i < len; i++)//Decrypt payload.
+                                xorBuf[i] = (byte)(data[pos + i] ^ xorValue);
+                            var index2 = 10 + 48;//44 is the start of the quat data.
+                            quatW = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            quatX = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            quatY = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            quatZ = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            //Console.WriteLine("qx:" + qX + " qy:" + qY+ "qz:" + qZ);
+
+                            //var eular = toEuler(quatX, quatY, quatZ, quatW);
+                            //Console.WriteLine(" Pitch:"+eular[0] * (180 / 3.141592) + " Roll:" + eular[1] * (180 / 3.141592) + " Yaw:" + eular[2] * (180 / 3.141592));
+
+                            index2 = 10 + 76;//Start of relative velocity
+                            velN = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            velE = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            velD = BitConverter.ToSingle(xorBuf, index2); index2 += 4;
+                            //Console.WriteLine(vN + " " + vE + " " + vD);
+
+                            break;
+
+                    }
+                    pos += len;
+                }
+            }
+            public double[] toEuler()
+            {
+                float qX = quatX;
+                float qY = quatY;
+                float qZ = quatZ;
+                float qW = quatW;
+
+                double sqW = qW * qW;
+                double sqX = qX * qX;
+                double sqY = qY * qY;
+                double sqZ = qZ * qZ;
+                double yaw = 0.0;
+                double roll = 0.0;
+                double pitch = 0.0;
+                double[] retv = new double[3];
+                double unit = sqX + sqY + sqZ + sqW; // if normalised is one, otherwise
+                                                     // is correction factor
+                double test = qW * qX + qY * qZ;
+                if (test > 0.499 * unit)
+                { // singularity at north pole
+                    yaw = 2 * Math.Atan2(qY, qW);
+                    pitch = Math.PI / 2;
+                    roll = 0;
+                }
+                else if (test < -0.499 * unit)
+                { // singularity at south pole
+                    yaw = -2 * Math.Atan2(qY, qW);
+                    pitch = -Math.PI / 2;
+                    roll = 0;
+                }
+                else
+                {
+                    yaw = Math.Atan2(2.0 * (qW * qZ - qX * qY),
+                            1.0 - 2.0 * (sqZ + sqX));
+                    roll = Math.Asin(2.0 * test / unit);
+                    pitch = Math.Atan2(2.0 * (qW * qY - qX * qZ),
+                            1.0 - 2.0 * (sqY + sqX));
+                }
+                retv[0] = pitch;
+                retv[1] = roll;
+                retv[2] = yaw;
+                return retv;
+            }
+
+            //For saving out state info.
             public string getLogHeader()
             {
                 StringBuilder sb = new StringBuilder();

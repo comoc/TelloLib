@@ -23,11 +23,14 @@ namespace aTello
         public static Keycode takeoffButtonCode = Keycode.ButtonStart;
         public static Keycode pictureButtonCode = Keycode.ButtonR1;
         public static Keycode recButtonCode = Keycode.ButtonL1;
+        public static Keycode homeButtonCode = Keycode.ButtonMode;
 
         public static int jpgQuality = 1;
         public static int exposure = 9;
         public static int videoBitRate = 0;
         public static int joyType = 0;
+        public static bool onScreenJoy = false;
+       
         public static int iFrameRate = TelloLib.Tello.iFrameRate;//5 = 4x second.
         public static bool cacheVideo = true;
 
@@ -45,6 +48,8 @@ namespace aTello
             setJoyType(jtype);
 
             jpgQuality = prefs.GetInt("jpgQuality", jpgQuality);
+
+            onScreenJoy = prefs.GetBoolean("onScreenJoy", onScreenJoy);
 
             exposure = prefs.GetInt("exposure", exposure);
             videoBitRate = prefs.GetInt("videoBitRate", videoBitRate);
@@ -67,6 +72,7 @@ namespace aTello
                     takeoffButtonCode = Keycode.ButtonStart;
                     pictureButtonCode = Keycode.ButtonR1;
                     recButtonCode = Keycode.ButtonL1;
+                    homeButtonCode = Keycode.ButtonA;
                     joyType = type;
                     break;
                 case 1://ps3
@@ -76,6 +82,7 @@ namespace aTello
                     takeoffButtonCode = Keycode.ButtonR2;
                     pictureButtonCode = Keycode.ButtonZ;
                     recButtonCode = Keycode.ButtonY;
+                    homeButtonCode = Keycode.ButtonMode;
                     joyType = type;
                     break;
             }
@@ -90,6 +97,7 @@ namespace aTello
             editor.PutInt("rxAxis", rxAxis);
             editor.PutInt("ryAxis", ryAxis);
             editor.PutInt("joyType", joyType);
+            editor.PutBoolean("onScreenJoy", onScreenJoy);
             editor.PutInt("jpgQuality", jpgQuality);
             editor.PutInt("exposure", exposure);
             editor.PutInt("videoBitRate", videoBitRate);

@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using System.Threading;
 using Plugin.FilePicker.Abstractions;
 using Plugin.FilePicker;
+using System.Drawing;
 
 namespace aTello
 {
@@ -34,8 +35,14 @@ namespace aTello
         JoystickView onScreenJoyL;
         JoystickView onScreenJoyR;
 
+        private bool forceSpeedMode = false;
+
         ImageButton takeoffButton;
         ImageButton throwTakeoffButton;
+        ImageButton rthButton;
+        private int rthButtonClickCount = 0;
+        ImageButton lookAtButton;
+        private int lookAtButtonClickCount = 0;
         string videoFilePath;//file to save raw h264 to. 
         private long totalVideoBytesReceived = 0;//used to calc video bit rate display.
 
@@ -46,11 +53,29 @@ namespace aTello
         private DateTime startRecordingTime;
 
         private bool doStateLogging = false;
-        
+
+        public bool isPaused = false;
+
+        private static MainActivity _mainActivity;
+        public static MainActivity getActivity()
+        {
+            return _mainActivity;
+        }
+
+        public override View OnCreateView(String name, Context context, Android.Util.IAttributeSet attrs)
+        {
+            var result = base.OnCreateView(name,context,attrs);
+
+            return result;
+        }
+
+
         protected override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
             SetContentView(Resource.Layout.Main);
+
+            _mainActivity = this;
 
             //force max brightness on screen.
             Window.Attributes.ScreenBrightness = 1f;
@@ -76,7 +101,10 @@ namespace aTello
 
             takeoffButton = FindViewById<ImageButton>(Resource.Id.takeoffButton);
             throwTakeoffButton = FindViewById<ImageButton>(Resource.Id.throwTakeoffButton);
-           
+
+            rthButton = FindViewById<ImageButton>(Resource.Id.rthButton);
+            lookAtButton = FindViewById<ImageButton>(Resource.Id.lookAtButton);
+
             //subscribe to Tello connection events
             Tello.onConnection += (Tello.ConnectionState newState) =>
             {
@@ -84,7 +112,8 @@ namespace aTello
                 Button cbutton = FindViewById<Button>(Resource.Id.connectButton);
 
                 //If not connected check to see if connected to tello network.
-                if (newState != Tello.ConnectionState.Connected)
+                if (newState != Tello.ConnectionState.Connected 
+                    && newState != Tello.ConnectionState.Paused)
                 {
                     WifiManager wifiManager = (WifiManager)Application.Context.GetSystemService(Context.WifiService);
                     string ip = Formatter.FormatIpAddress(wifiManager.ConnectionInfo.IpAddress);
@@ -99,6 +128,12 @@ namespace aTello
                         return;
                     }
                 }
+                if (newState == Tello.ConnectionState.Paused)
+                {
+                }
+                if (newState == Tello.ConnectionState.UnPausing)
+                {
+                }
                 if (newState == Tello.ConnectionState.Connected)
                 {
                     //Tello.queryMaxHeight();
@@ -112,23 +147,36 @@ namespace aTello
 
                     Tello.setJpgQuality(Preferences.jpgQuality);
 
-                    CrossTextToSpeech.Current.Speak("Connected");
-                    
+                    notifyUser("Connected");
+
                     Tello.setPicVidMode(picMode);//0=picture(960x720)
 
                     Tello.setEV(Preferences.exposure);
+
+                    Tello.setVideoBitRate(Preferences.videoBitRate);
+                    Tello.setVideoDynRate(1);
+
+                    if (forceSpeedMode)
+                        Tello.controllerState.setSpeedMode(1);
+                    else
+                        Tello.controllerState.setSpeedMode(0);
 
                 }
                 if (newState == Tello.ConnectionState.Disconnected)
                 {
                     //if was connected then warn.
                     if(Tello.connectionState== Tello.ConnectionState.Connected)
-                        CrossTextToSpeech.Current.Speak("Disconnected");
+                        notifyUser("Disconnected");
                 }
                 //update connection state button.
                 RunOnUiThread(() => {
-                    cbutton.Text = newState.ToString();
-                    if (newState == Tello.ConnectionState.Connected)
+
+                    if (newState == Tello.ConnectionState.UnPausing)//Fix. Don't show "unpausing" string.
+                        cbutton.Text = Tello.ConnectionState.Connected.ToString();
+                    else
+                        cbutton.Text = newState.ToString();
+
+                    if (newState == Tello.ConnectionState.Connected || newState == Tello.ConnectionState.UnPausing)
                         cbutton.SetBackgroundColor(Android.Graphics.Color.ParseColor("#6090ee90"));//transparent light green.
                     else
                         cbutton.SetBackgroundColor(Android.Graphics.Color.ParseColor("#ffff00"));//yellow
@@ -155,44 +203,143 @@ namespace aTello
                 File.WriteAllText(logFilePath, "time," + Tello.state.getLogHeader());
             }
 
+            //Long click vert speed to force fast mode. 
+            hSpeedTextView.LongClick += delegate {
+                forceSpeedMode = !forceSpeedMode;
+                if (forceSpeedMode)
+                    Tello.controllerState.setSpeedMode(1);
+                else
+                    Tello.controllerState.setSpeedMode(0);
+            };
+            
+            cameraShutterSound.Load("cameraShutterClick.mp3");
             //subscribe to Tello update events
-            Tello.onUpdate += (Tello.FlyData newState) =>
+            Tello.onUpdate += (int cmdId) =>
             {
                 if (doStateLogging)
                 {
                     //write update to log.
                     var elapsed = DateTime.Now - logStartTime;
-                    File.AppendAllText(logFilePath, elapsed.ToString(@"mm\:ss\:ff\,") + newState.getLogLine());
+                    File.AppendAllText(logFilePath, elapsed.ToString(@"mm\:ss\:ff\,") + Tello.state.getLogLine());
                 }
 
                 RunOnUiThread(() => {
-                    //Update state on screen
+                    if (cmdId == 86)//ac status update. 
+                    {
+                        //Update state on screen
+                        modeTextView.Text = "FM:" + Tello.state.flyMode;
+                        hSpeedTextView.Text = string.Format("HS:{0: 0.0;-0.0}m/s", (float)Tello.state.flySpeed / 10);
+                        vSpeedTextView.Text = string.Format("VS:{0: 0.0;-0.0}m/s", -(float)Tello.state.verticalSpeed / 10);//Note invert so negative means moving down. 
+                        heiTextView.Text = string.Format("Hei:{0: 0.0;-0.0}m", (float)Tello.state.height / 10);
 
-                    modeTextView.Text = "FM:" + newState.flyMode;
-                    hSpeedTextView.Text = string.Format("HS:{0: 0.0;-0.0}m/s", (float)newState.flySpeed / 10);
-                    vSpeedTextView.Text = string.Format("VS:{0: 0.0;-0.0}m/s", -(float)newState.verticalSpeed / 10);//Note invert so negative means moving down. 
-                    heiTextView.Text = string.Format("Hei:{0: 0.0;-0.0}m", (float)newState.height / 10);
+                        if (Tello.controllerState.speed > 0)
+                            hSpeedTextView.SetBackgroundColor(Android.Graphics.Color.IndianRed);
+                        else
+                            hSpeedTextView.SetBackgroundColor(Android.Graphics.Color.DarkGreen);
 
-                    if (Tello.controllerState.speed > 0)
-                        hSpeedTextView.SetBackgroundColor(Android.Graphics.Color.IndianRed);
-                    else
-                        hSpeedTextView.SetBackgroundColor(Android.Graphics.Color.Transparent);
+                        batTextView.Text = "Bat:" + Tello.state.batteryPercentage;
+                        wifiTextView.Text = "Wifi:" + Tello.state.wifiStrength;
 
-                    batTextView.Text = "Bat:" + newState.batteryPercentage;
-                    wifiTextView.Text = "Wifi:" + newState.wifiStrength;
+                        /*if (bAutopilot)
+                            rthButton.SetBackgroundColor(Android.Graphics.Color.DarkGreen);
+                        else
+                            rthButton.SetBackgroundColor(Android.Graphics.Color.White);
+                            
+                         */
 
-                    //acstat.Text = str;
-                    if (Tello.state.flying)
-                        takeoffButton.SetImageResource(Resource.Drawable.land);
-                    else if (!Tello.state.flying)
-                        takeoffButton.SetImageResource(Resource.Drawable.takeoff_white);
+                        //Autopilot debugging.
+                        if (/*!bAutopilot &&*/ Tello.state.flying)
+                        {
+                            var eular = Tello.state.toEuler();
+                            var yaw = eular[2];
+
+                            var deltaPosX = autopilotTarget.X - Tello.state.posX;
+                            var deltaPosY = autopilotTarget.Y - Tello.state.posY;
+                            var dist = Math.Sqrt(deltaPosX * deltaPosX + deltaPosY * deltaPosY);
+                            var normalizedX = deltaPosX / dist;
+                            var normalizedY = deltaPosY / dist;
+
+                            var ldeltaPosX = lookAtTarget.X - Tello.state.posX;
+                            var ldeltaPosY = lookAtTarget.Y - Tello.state.posY;
+                            var ldist = Math.Sqrt(ldeltaPosX * ldeltaPosX + ldeltaPosY * ldeltaPosY);
+                            var lnormalizedX = ldeltaPosX / ldist;
+                            var lnormalizedY = ldeltaPosY / ldist;
+
+                            var targetYaw = Math.Atan2(lnormalizedY, lnormalizedX);
+
+                            double deltaYaw = 0.0;
+                            if (Math.Abs(targetYaw - yaw) < Math.PI)
+                                deltaYaw= targetYaw - yaw;
+                            else if (targetYaw > yaw)
+                                deltaYaw = targetYaw - yaw - Math.PI * 2.0f;
+                            else
+                                deltaYaw = targetYaw - yaw + Math.PI * 2.0f;
+
+                            var str = string.Format("x {0:0.00; -0.00} y {1:0.00; -0.00} yaw {2:0.00; -0.00} Unc:{3:0.00; -0.00} tDist {4:0.00; -0.00} On:{5} targetYaw {6:0.00; -0.00} ",
+                                    Tello.state.posX, Tello.state.posY,
+                                    (((yaw * (180.0 / Math.PI)) ) ),
+//                                    (((yaw * (180.0 / Math.PI)) + 360.0) % 360.0),
+                                    Tello.state.posUncertainty
+                                    ,dist,
+                                    bAutopilot.ToString()
+                                    , (((deltaYaw * (180.0 / Math.PI)) ) )
+//                                    , (((targetYaw * (180.0 / Math.PI)) + 360.0) % 360.0)
+                                    );
+
+                            TextView joystat = FindViewById<TextView>(Resource.Id.joystick_state);
+                            joystat.Text = str;
+                        }
+
+                        if (!Tello.state.flying)//debug joystick
+                        {
+                            TextView joystat = FindViewById<TextView>(Resource.Id.joystick_state);
+
+                            //var dataStr = string.Join(" ", buttons);
+                            joystat.Text = string.Format("JOY lx:{0: 0.00;-0.00} ly:{1: 0.00;-0.00} rx:{2: 0.00;-0.00} ry:{3: 0.00;-0.00}  ",
+                                Tello.controllerState.lx,
+                                Tello.controllerState.ly,
+                                Tello.controllerState.rx,
+                                Tello.controllerState.ry);
+                        }
+
+                        //acstat.Text = str;
+                        if (Tello.state.flying)
+                            takeoffButton.SetImageResource(Resource.Drawable.land);
+                        else if (!Tello.state.flying)
+                            takeoffButton.SetImageResource(Resource.Drawable.takeoff);
+                    }
+                    if (cmdId == 48)//ack picture start. 
+                    {
+                        cameraShutterSound.Play();
+                    }
+                    if (cmdId == 98)//start picture download. 
+                    {
+                    }
+                    if (cmdId == 100)//picture piece downloaded. 
+                    {
+                        if(Tello.picDownloading==false)//if done downloading.
+                        {
+                            if (remainingExposures >= 0)
+                            {
+                                var exposureSet = new int[]{0,-2,8};
+                                Tello.setEV(Preferences.exposure + exposureSet[remainingExposures]);
+                                remainingExposures--;
+                                Tello.takePicture();
+                            }
+                            if(remainingExposures==-1)//restore exposure. 
+                                Tello.setEV(Preferences.exposure);
+                        }
+                    }
                 });
+
+                //Do autopilot input.
+                handleAutopilot();
 
             };
 
+
             var videoFrame = new byte[100 * 1024];
             var videoOffset = 0;
-            Video.Decoder.surface = FindViewById<SurfaceView>(Resource.Id.surfaceView).Holder.Surface;
 
             var path = "aTello/video/";
             System.IO.Directory.CreateDirectory(Path.Combine(Android.OS.Environment.ExternalStorageDirectory.Path, path+"cache/"));
@@ -201,9 +348,9 @@ namespace aTello
             FileStream videoStream = null;
 
             startUIUpdateThread();
-            //updateUI();//hide record light etc. 
 
             //subscribe to Tello video data
+            var vidCount = 0;
             Tello.onVideoData += (byte[] data) =>
             {
                 totalVideoBytesReceived += data.Length;
@@ -227,13 +374,14 @@ namespace aTello
                                 {
                                     videoFilePath = Path.Combine(Android.OS.Environment.ExternalStorageDirectory.Path, path + DateTime.Now.ToString("MMMM dd yyyy HH-mm-ss") + ".h264");
                                     startRecordingTime = DateTime.Now;
-                                    CrossTextToSpeech.Current.Speak("Recording");
+                                    //                                    Tello.setVideoRecord(vidCount++);
+                                    notifyUser("Recording");
                                     updateUI();
                                 }
                                 else
                                 {
                                     videoFilePath = Path.Combine(Android.OS.Environment.ExternalStorageDirectory.Path, path + "cache/" + DateTime.Now.ToString("MMMM dd yyyy HH-mm-ss") + ".h264");
-                                    CrossTextToSpeech.Current.Speak("Recording stopped");
+                                    notifyUser("Recording stopped");
                                     updateUI();
                                 }
                             }
@@ -267,7 +415,14 @@ namespace aTello
                         }
                         if (videoOffset > 0)
                         {
-                            aTello.Video.Decoder.decode(videoFrame.Take(videoOffset).ToArray());
+                            if (!isPaused)//surfaces are lost when paused.
+                            {
+                                //aTello.Video.Decoder.decode(videoFrame.Take(videoOffset).ToArray());
+
+                                //todo. get rid of buffer copy.
+                                var decoderView = FindViewById<DecoderView>(Resource.Id.DecoderView);
+                                decoderView.decode(videoFrame.Take(videoOffset).ToArray());
+                            }
                             videoOffset = 0;
                         }
                         //var nal = (received.bytes[6] & 0x1f);
@@ -297,8 +452,67 @@ namespace aTello
 
             };
 
-            
-            takeoffButton.Click += delegate {
+            rthButton.LongClick += delegate {
+                if (bAutopilot)
+                    cancelAutopilot();
+                else if(bHomepointSet)
+                {
+                    bAutopilot = true;
+                    notifyUser("Autopilot engaged");
+                }
+            };
+
+            rthButton.Click += delegate {
+                cancelAutopilot();//Stop if going.
+                if (rthButtonClickCount == 0)
+                {
+                    notifyUser("Press again to set home point. Long press to fly to home.", false);
+                }
+
+                if (rthButtonClickCount == 1)
+                {//force set of new home point. 
+                    bHomepointSet = false;
+                }
+                rthButtonClickCount++;
+                Handler h = new Handler();
+                Action myAction = () =>
+                {
+                    rthButtonClickCount = 0;
+                };
+
+                h.PostDelayed(myAction, 750);//750=3/4 of a second
+            };
+            lookAtButton.LongClick += delegate {
+                if (bLookAt)
+                    cancelLookAt();
+                else if (bLookAtTargetSet)
+                {
+                    bLookAt = true;
+                    notifyUser("Look at engaged");
+                }
+            };
+
+            lookAtButton.Click += delegate {
+                cancelLookAt();//Stop if going.
+                if (lookAtButtonClickCount == 0)
+                {
+                    notifyUser("Press again to set look target. Long press to lock on target.", false);
+                }
+
+                if (lookAtButtonClickCount == 1)
+                {//force set of new home point. 
+                    bLookAtTargetSet = false;
+                }
+                lookAtButtonClickCount++;
+                Handler h = new Handler();
+                Action myAction = () =>
+                {
+                    lookAtButtonClickCount = 0;
+                };
+
+                h.PostDelayed(myAction, 750);//750=3/4 of a second
+            };
+            takeoffButton.LongClick += delegate {
                 if (Tello.connected && !Tello.state.flying)
                 {
                     Tello.takeOff();
@@ -308,7 +522,7 @@ namespace aTello
                     Tello.land();
                 }
             };
-            throwTakeoffButton.Click += delegate {
+            throwTakeoffButton.LongClick += delegate {
                 if (Tello.connected && !Tello.state.flying)
                 {
                     Tello.throwTakeOff();
@@ -322,20 +536,19 @@ namespace aTello
             Tello.picPath = Path.Combine(Android.OS.Environment.ExternalStorageDirectory.Path, "aTello/pics/");
             System.IO.Directory.CreateDirectory(Tello.picPath);
 
-
-            cameraShutterSound.Load("cameraShutterClick.mp3");
             pictureButton.Click += delegate
             {
+                remainingExposures = -1;
                 Tello.takePicture();
-                cameraShutterSound.Play();
             };
+            /*
+            * Multiple exposure. Not working yet.
             pictureButton.LongClick += delegate
             {
-                //Toggle
-                picMode= picMode == 1?0:1;
-                Tello.setPicVidMode(picMode);
-                aTello.Video.Decoder.reconfig();
+                remainingExposures = 2;
+                Tello.takePicture();
             };
+            */
 
             var recordButton = FindViewById<ImageButton>(Resource.Id.recordButton);
             recordButton.Click += delegate
@@ -343,11 +556,15 @@ namespace aTello
                 toggleRecording = true;
             };
 
+            recordButton.LongClick += delegate
+            {
+                //Toggle
+                picMode = picMode == 1 ? 0 : 1;
+                Tello.setPicVidMode(picMode);
+            };
             var galleryButton = FindViewById<ImageButton>(Resource.Id.galleryButton);
             galleryButton.Click += async delegate
             {
-
-
                 //var uri = Android.Net.Uri.FromFile(new Java.IO.File(Tello.picPath));
                 //shareImage(uri);
                 //return;
@@ -355,7 +572,7 @@ namespace aTello
                 intent.PutExtra(Intent.ActionView, Tello.picPath);
                 intent.SetType("image/*");
                 intent.SetAction(Intent.ActionGetContent);
-                StartActivityForResult(Intent.CreateChooser(intent,"Select Picture"), 1);
+                StartActivityForResult(Intent.CreateChooser(intent,"Select Picture"),1);
             };
             //Settings button
             ImageButton settingsButton = FindViewById<ImageButton>(Resource.Id.settingsButton);
@@ -368,6 +585,165 @@ namespace aTello
             //Init joysticks.
             input_manager = (InputManager)GetSystemService(Context.InputService);
             CheckGameControllers();
+        }
+
+        public void notifyUser(string message,bool bSpeak=true)
+        {
+            if(bSpeak)
+                CrossTextToSpeech.Current.Speak(message);
+
+            RunOnUiThread(async () =>
+            {
+                Toast.MakeText(Application.Context, message, ToastLength.Long).Show();
+            });
+        }
+
+        private bool bAutopilot=false;
+        private PointF autopilotTarget=new PointF(0,0);
+        //private PointF autopilotLookTarget = null;
+        private bool bHomepointSet = false;
+
+        private bool bLookAt = false;
+        private PointF lookAtTarget = new PointF(0, 0);
+        //private PointF autopilotLookTarget = null;
+        private bool bLookAtTargetSet = false;
+
+
+        public void setAutopilotTarget(PointF target)
+        {
+            if (Tello.state.flying)
+            {
+                autopilotTarget = target;
+            }
+        }
+        public void cancelAutopilot()
+        {
+            if(bAutopilot)
+                notifyUser("Autopilot disengaged");
+            Tello.autoPilotControllerState.setAxis(0, 0, 0, 0);
+            Tello.sendControllerUpdate();
+            bAutopilot = false;
+
+        }
+
+        public void setLookAtTarget(PointF target)
+        {
+            if (Tello.state.flying)
+            {
+                lookAtTarget = target;
+            }
+        }
+        public void cancelLookAt()
+        {
+            if (bLookAt)
+                notifyUser("Look at disengaged");
+            Tello.autoPilotControllerState.setAxis(0, 0, 0, 0);
+            Tello.sendControllerUpdate();
+            bLookAt = false;
+
+        }
+  
+        private void handleAutopilot()
+        {
+            if(!Tello.state.flying)
+            {
+                bHomepointSet = false;
+                bLookAtTargetSet = false;
+                return;
+            }
+
+            if (!bHomepointSet)
+            {
+                if(Tello.state.posUncertainty>0.03)
+                {
+                    //set new home point
+                    setAutopilotTarget(new PointF(Tello.state.posX, Tello.state.posY));
+                    notifyUser("Homepoint set");
+                    bHomepointSet = true;
+                }
+            }
+
+            if (!bLookAtTargetSet)
+            {
+                if(Tello.state.posUncertainty>0.03)
+                {
+                    //set new home point
+                    setLookAtTarget(new PointF(Tello.state.posX, Tello.state.posY));
+                    notifyUser("Look at set");
+                    bLookAtTargetSet = true;
+                }
+            }
+
+            double lx = 0, ly = 0, rx = 0, ry = 0;
+            bool updated = false;
+            if (bLookAt && bLookAtTargetSet)
+            {
+                var eular = Tello.state.toEuler();
+                var yaw = eular[2];
+
+                var deltaPosX = lookAtTarget.X - Tello.state.posX;
+                var deltaPosY = lookAtTarget.Y - Tello.state.posY;
+                var dist = Math.Sqrt(deltaPosX * deltaPosX + deltaPosY * deltaPosY);
+                var normalizedX = deltaPosX / dist;
+                var normalizedY = deltaPosY / dist;
+
+                var targetYaw = Math.Atan2(normalizedY, normalizedX);
+
+                double deltaYaw = 0.0;
+                if (Math.Abs(targetYaw - yaw) < Math.PI)
+                    deltaYaw = targetYaw - yaw;
+                else if (targetYaw > yaw)
+                    deltaYaw = targetYaw - yaw - Math.PI * 2.0f;
+                else
+                    deltaYaw = targetYaw - yaw + Math.PI * 2.0f;
+
+
+                var minYaw = 0.1;//Radians
+                if (Math.Abs(deltaYaw) > minYaw)
+                {
+                    lx = Math.Min(1.0, deltaYaw * 1.0);
+                    updated = true;
+                }
+                else if (deltaYaw < -minYaw)
+                {
+                    lx = -Math.Min(1.0, deltaYaw * 1.0);
+                    updated = true;
+                }
+            }
+            if (bAutopilot && bHomepointSet)
+            {
+                var eular = Tello.state.toEuler();
+                var yaw = eular[2];
+
+                var deltaPosX = autopilotTarget.X - Tello.state.posX;
+                var deltaPosY = autopilotTarget.Y - Tello.state.posY;
+                var dist = Math.Sqrt(deltaPosX * deltaPosX + deltaPosY * deltaPosY);
+                var normalizedX = deltaPosX / dist;
+                var normalizedY = deltaPosY / dist;
+
+                var targetYaw = Math.Atan2(normalizedY, normalizedX);
+                var deltaYaw = targetYaw - yaw;
+
+                var minDist = 0.25;//Meters (I think)
+
+                if (dist > minDist)
+                {
+                    var speed = Math.Min(0.45, dist*2);//0.2 limits max throttle for safety.
+                    rx = speed * Math.Sin(deltaYaw);
+                    ry = speed * Math.Cos(deltaYaw);
+                    updated = true;
+                }
+                else
+                {
+                    cancelAutopilot();//arrived
+                    updated = true;
+                }
+            }
+            if (updated)
+            {
+                Tello.autoPilotControllerState.setAxis((float)lx, (float)ly, (float)rx, (float)ry);
+                Tello.sendControllerUpdate();
+            }
         }
 
         private void startUIUpdateThread()
@@ -398,12 +774,12 @@ namespace aTello
                             if (bFlying)
                             {
                                 throwButton.Visibility = ViewStates.Gone;
-                                galleryButton.Visibility = ViewStates.Gone;
+                                //galleryButton.Visibility = ViewStates.Gone;
                             }
                             else
                             {
                                 throwButton.Visibility = ViewStates.Visible;
-                                galleryButton.Visibility = ViewStates.Visible;
+                                //galleryButton.Visibility = ViewStates.Visible;
                             }
                             if((tick%4)==0)//Every second.
                             {
@@ -413,6 +789,8 @@ namespace aTello
                                     vbrTextView.Text =string.Format("Vbr:{0}k i:{1}",(perSec / 1024),Tello.iFrameRate);
                                 }
                                 videoBytesReceivedLastSecond = totalVideoBytesReceived;
+
+                                updateOnScreenJoyVisibility();
                             }
                         });
                         Thread.Sleep(250);//Often enough?
@@ -436,24 +814,37 @@ namespace aTello
                     recLight.Visibility = ViewStates.Gone;
             });
         }
-        // Share image
-        private void shareImage(Android.Net.Uri imagePath)
-        {
-            Intent sharingIntent = new Intent(Intent.ActionSend);
-            sharingIntent.AddFlags(ActivityFlags.ClearWhenTaskReset);
-            sharingIntent.SetType("image/*");
-            sharingIntent.PutExtra(Intent.ExtraStream, imagePath);
-            StartActivity(Intent.CreateChooser(sharingIntent, "Share Image Using"));
-        }
+
 
         public void OnTouchJoystickMoved(JoystickView joystickView )
         {
-            Tello.controllerState.setAxis(onScreenJoyL.normalizedX, -onScreenJoyL.normalizedY, onScreenJoyR.normalizedX, -onScreenJoyR.normalizedY );
+            //Right stick movement cancels autopilot.
+            if (bAutopilot && (Math.Abs(onScreenJoyR.normalizedX) > 0.1 || Math.Abs(onScreenJoyR.normalizedY) > 0.1))
+                cancelAutopilot();
+
+            //Left stick movement cancels autopilot.
+            if (bLookAt && (Math.Abs(onScreenJoyL.normalizedX) > 0.1 || Math.Abs(onScreenJoyL.normalizedY) > 0.1))
+                cancelLookAt();
+
+            if (isPaused)//Zero out any movement when paused.
+                Tello.controllerState.setAxis(0, 0, 0, 0);
+            else
+            {
+                var deadBand = 0.15f;
+                var rx = Math.Abs(onScreenJoyR.normalizedX) < deadBand ? 0.0f : onScreenJoyR.normalizedX;
+                var ry = Math.Abs(onScreenJoyR.normalizedY) < deadBand ? 0.0f : onScreenJoyR.normalizedY;
+                var lx = Math.Abs(onScreenJoyL.normalizedX) < deadBand ? 0.0f : onScreenJoyL.normalizedX;
+                var ly = Math.Abs(onScreenJoyL.normalizedY) < deadBand ? 0.0f : onScreenJoyL.normalizedY;
+
+                Tello.controllerState.setAxis(lx, -ly, rx, -ry);
+            }
             Tello.sendControllerUpdate();
         }
         public float hatAxisX, hatAxisY;
         //Handle joystick axis events.
         private DateTime lastFlip;
+        private int remainingExposures;
+
         public override bool OnGenericMotionEvent(MotionEvent e)
         {
             InputDevice device = e.Device;
@@ -466,8 +857,25 @@ namespace aTello
                     var rx = GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(Preferences.rxAxis));// axes[2];
                     var ry = -GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(Preferences.ryAxis));//-axes[3];
 
+                    //Right stick movement cancels autopilot.
+                    if (bAutopilot && (Math.Abs(rx) > 0.1 || Math.Abs(ry) > 0.1))
+                        cancelAutopilot();
 
-                    Tello.controllerState.setAxis(lx, ly, rx, ry);
+                    //Left stick movement cancels autopilot.
+                    if (bLookAt && (Math.Abs(lx) > 0.1 || Math.Abs(ly) > 0.1))
+                        cancelLookAt();
+
+                    var deadBand = 0.15f;
+                    rx = Math.Abs(rx) < deadBand ? 0.0f : rx;
+                    ry = Math.Abs(ry) < deadBand ? 0.0f : ry;
+                    lx = Math.Abs(lx) < deadBand ? 0.0f : lx;
+                    ly = Math.Abs(ly) < deadBand ? 0.0f : ly;
+
+                    if (isPaused)//Zero out any movement when paused.
+                        Tello.controllerState.setAxis(0, 0, 0, 0);
+                    else
+                        Tello.controllerState.setAxis(lx, ly, rx, ry);
+
                     Tello.sendControllerUpdate();
 
                     updateOnScreenJoyVisibility();
@@ -500,22 +908,6 @@ namespace aTello
                         }
                     }
 
-
-                    RunOnUiThread(() =>
-                    {
-                        TextView joystat = FindViewById<TextView>(Resource.Id.joystick_state);
-
-                        //var dataStr = string.Join(" ", buttons);
-                        joystat.Text = string.Format("JOY 0:{0: 0.00;-0.00} 1:{1: 0.00;-0.00} 2:{2: 0.00;-0.00} 3:{3: 0.00;-0.00} 4:{4: 0.00;-0.00} ",// BTN: " + dataStr,
-                            GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(0)),
-                            GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(1)),
-                            GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(2)),
-                            GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(3)),
-                            GetCenteredAxis(e, device, AxesMapping.OrdinalValueAxis(4))
-                            );
-                    });
- 
-
                     //controller_view.Invalidate();
                     return true;
                 }
@@ -530,8 +922,36 @@ namespace aTello
             {
                 if (keyCode == Preferences.speedButtonCode)
                 {
-                    Tello.controllerState.setSpeedMode(0);
+                    if(forceSpeedMode)
+                        Tello.controllerState.setSpeedMode(1);
+                    else
+                        Tello.controllerState.setSpeedMode(0);
                     Tello.sendControllerUpdate();
+                    return true;
+                }
+                if (keyCode == Preferences.homeButtonCode)
+                {
+                    if (rthPressCount < 7)
+                    {
+                        cancelAutopilot();
+                        if (rthDoublePress)
+                        {
+                            bHomepointSet = false;
+                            rthDoublePress = false;
+                        }
+                        else
+                        {
+                            rthDoublePress = true;
+                            //notifyUser("Press again to set home point. Long press to fly to home.", false);
+                            Handler h = new Handler();
+                            Action myAction = () =>
+                            {
+                                rthDoublePress = false;
+                            };
+
+                            h.PostDelayed(myAction, 750);
+                        }
+                    }
                     return true;
                 }
 
@@ -539,6 +959,8 @@ namespace aTello
             return base.OnKeyUp(keyCode, e);
         }
 
+        private int rthPressCount = 0;
+        private bool rthDoublePress = false;
         public override bool OnKeyDown(Keycode keyCode, KeyEvent e)
         {
             InputDevice device = e.Device;
@@ -563,10 +985,24 @@ namespace aTello
                         Tello.land();
                         return true;
                     }
+                    if (keyCode == Preferences.homeButtonCode)
+                    {
+                        rthPressCount = e.RepeatCount;
+                        if (e.RepeatCount == 7)
+                        {
+                            if (bAutopilot)
+                                cancelAutopilot();
+                            else if (bHomepointSet)
+                            {
+                                bAutopilot = true;
+                                notifyUser("Autopilot engaged");
+                            }
+                        }
+                        return true;
+                    }
                     if (keyCode == Preferences.pictureButtonCode && e.RepeatCount == 0)
                     {
                         Tello.takePicture();
-                        cameraShutterSound.Play();
                         return true;
                     };
                     if (keyCode == Preferences.recButtonCode && e.RepeatCount == 0)
@@ -623,20 +1059,64 @@ namespace aTello
         protected override void OnResume()
         {
             base.OnResume();
+
+            isPaused = false;
             input_manager.RegisterInputDeviceListener(this, null);
             updateOnScreenJoyVisibility();
+            //fix if joy was moved when paused.
+            onScreenJoyL.returnHandleToCenter();
+            onScreenJoyR.returnHandleToCenter();
+
+            Tello.connectionSetPause(false);//reanable connections if paused. 
         }
 
         protected override void OnPause()
         {
+            //fix if joy was moved when paused.
+            onScreenJoyL.returnHandleToCenter();
+            onScreenJoyR.returnHandleToCenter();
+
+            //Zero out Joy input so we don't keep flying.
+            Tello.controllerState.setAxis(0, 0, 0, 0);
+            Tello.sendControllerUpdate();
+
+            cancelAutopilot();
+
+            isPaused = true;
+
+            Tello.connectionSetPause(true);//pause connections (if connected). 
+
+            var decoderView = FindViewById<DecoderView>(Resource.Id.DecoderView);
+            decoderView.stop();
+
             base.OnPause();
             input_manager.UnregisterInputDeviceListener(this);
         }
 
-
-        private void updateOnScreenJoyVisibility()
+        bool doubleBackToExitPressedOnce = false;
+        public override void OnBackPressed()
         {
-            if (current_device_id > -1)
+            if (doubleBackToExitPressedOnce)
+            {
+                base.OnBackPressed();
+                return;
+            }
+
+            this.doubleBackToExitPressedOnce = true;
+            Toast.MakeText(this, "Click BACK again to exit", ToastLength.Short).Show();
+
+            Handler h = new Handler();
+            Action myAction = () =>
+            {
+                doubleBackToExitPressedOnce = false;
+            };
+
+            h.PostDelayed(myAction, 2000);
+        }
+
+        public void updateOnScreenJoyVisibility()
+        {
+            if (current_device_id > -1 && !Preferences.onScreenJoy)
             {
                 RunOnUiThread(() =>
                 {
@@ -688,54 +1168,75 @@ namespace aTello
 
         public void OnInputDeviceAdded(int deviceId)
         {
-            //Log.Debug(TAG, "OnInputDeviceAdded: " + deviceId);
-            if (!connected_devices.Contains(deviceId))
+            try
             {
-                connected_devices.Add(deviceId);
-            }
-            if (current_device_id == -1)
-            {
-                current_device_id = deviceId;
-                InputDevice dev = InputDevice.GetDevice(current_device_id);
-                if (dev != null)
+                //Log.Debug(TAG, "OnInputDeviceAdded: " + deviceId);
+                if (!connected_devices.Contains(deviceId))
                 {
-                    //controller_view.SetCurrentControllerNumber(dev.ControllerNumber);
-                    //controller_view.Invalidate();
+                    connected_devices.Add(deviceId);
                 }
+                if (current_device_id == -1)
+                {
+                    current_device_id = deviceId;
+                    InputDevice dev = InputDevice.GetDevice(current_device_id);
+                    if (dev != null)
+                    {
+                        //controller_view.SetCurrentControllerNumber(dev.ControllerNumber);
+                        //controller_view.Invalidate();
+                    }
+                }
+                updateOnScreenJoyVisibility();
+            }catch(Exception ex)
+            {//trying to figure out why this might crash video decoder.
+                notifyUser("Joystick exception OnInputDeviceAdded " + ex.Message, false);
             }
-            updateOnScreenJoyVisibility();
         }
 
         public void OnInputDeviceRemoved(int deviceId)
         {
-            //Log.Debug(TAG, "OnInputDeviceRemoved: ", deviceId);
-            connected_devices.Remove(deviceId);
-            if (current_device_id == deviceId)
-                current_device_id = -1;
+            try
+            {
+                //Log.Debug(TAG, "OnInputDeviceRemoved: ", deviceId);
+                connected_devices.Remove(deviceId);
+                if (current_device_id == deviceId)
+                    current_device_id = -1;
 
-            if (connected_devices.Count == 0)
-            {
-                //controller_view.SetCurrentControllerNumber(-1);
-                //controller_view.Invalidate();
-            }
-            else
-            {
-                current_device_id = connected_devices[0];
-                InputDevice dev = InputDevice.GetDevice(current_device_id);
-                if (dev != null)
+                if (connected_devices.Count == 0)
                 {
-                    //controller_view.SetCurrentControllerNumber(dev.ControllerNumber);
+                    //controller_view.SetCurrentControllerNumber(-1);
                     //controller_view.Invalidate();
                 }
+                else
+                {
+                    current_device_id = connected_devices[0];
+                    InputDevice dev = InputDevice.GetDevice(current_device_id);
+                    if (dev != null)
+                    {
+                        //controller_view.SetCurrentControllerNumber(dev.ControllerNumber);
+                        //controller_view.Invalidate();
+                    }
+                }
+                updateOnScreenJoyVisibility();
             }
-            updateOnScreenJoyVisibility();
+            catch (Exception ex)
+            {//trying to figure out why this might crash video decoder.
+                notifyUser("Joystick exception OnInputDeviceRemoved " + ex.Message, false);
+            }
+
         }
 
         public void OnInputDeviceChanged(int deviceId)
         {
-            //Log.Debug(TAG, "OnInputDeviceChanged: " + deviceId);
-            //controller_view.Invalidate();
-            updateOnScreenJoyVisibility();
+            try
+            {
+                //Log.Debug(TAG, "OnInputDeviceChanged: " + deviceId);
+                //controller_view.Invalidate();
+                updateOnScreenJoyVisibility();
+            }
+            catch (Exception ex)
+            {//trying to figure out why this might crash video decoder.
+                notifyUser("Joystick exception OnInputDeviceChanged " + ex.Message, false);
+            }
         }
 
 
