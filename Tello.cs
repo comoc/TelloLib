@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -24,8 +24,8 @@ namespace TelloLib
         public delegate void videoUpdateDeligate(byte[] data);
         public static event videoUpdateDeligate onVideoData;
 
-        public static string picPath;//todo redo this. 
-        public static string picFilePath;//todo redo this. 
+        public static string picPath;//todo redo this.
+        public static string picFilePath;//todo redo this.
         public static int picMode = 0;//pic or vid aspect ratio.
 
         public static int iFrameRate = 5;//How often to ask for iFrames in 50ms. Ie 2=10x 5=4x 10=2xSecond 5 = 4xSecond
@@ -38,11 +38,14 @@ namespace TelloLib
             Connecting,
             Connected,
             Paused,//used to keep from disconnecting when starved for input.
-            UnPausing//Transition. Never stays in this state. 
+            UnPausing//Transition. Never stays in this state.
         }
         public static ConnectionState connectionState = ConnectionState.Disconnected;
 
         private static CancellationTokenSource cancelTokens = new CancellationTokenSource();//used to cancel listeners
+
+		private static CancellationTokenSource masterCancelTokens = new CancellationTokenSource();
+		private static bool useVideoServer = false;
 
         public static void takeOff()
         {
@@ -334,7 +337,7 @@ namespace TelloLib
             client.Send(packet);
         }
 
-        //this might not be working right 
+        //this might not be working right
         public static void sendAckLogConfig(short cmd, ushort id,int n2)
         {
             //                                          crc    typ  cmdL  cmdH  seqL  seqH  unk   idL   idH  n2L   n2H  n2L   n2H   crc   crc
@@ -401,7 +404,7 @@ namespace TelloLib
             }
 
             connectionState = ConnectionState.Disconnected;
-            
+
         }
         private static void connect()
         {
@@ -450,7 +453,7 @@ namespace TelloLib
             cancelTokens = new CancellationTokenSource();
             CancellationToken token = cancelTokens.Token;
 
-            //wait for reply messages from the tello and process. 
+            //wait for reply messages from the tello and process.
             Task.Factory.StartNew(async () =>
             {
                 while (true)
@@ -559,10 +562,10 @@ namespace TelloLib
                             if(picBytesExpected>picbuffer.Length)
                             {
                                 Console.WriteLine("WARNING:Picture Too Big! " + picBytesExpected);
-                                picbuffer = new byte[picBytesExpected]; 
+                                picbuffer = new byte[picBytesExpected];
                             }
                             picBytesRecived = 0;
-                            picChunkState = new bool[(picBytesExpected/1024)+1]; //calc based on size. 
+                            picChunkState = new bool[(picBytesExpected/1024)+1]; //calc based on size.
                             picPieceState = new bool[(picChunkState.Length / 8)+1];
                             picExtraPackets = 0;//for debugging.
                             picDownloading = true;
@@ -617,7 +620,7 @@ namespace TelloLib
                                     sendAckFileDone((int)picBytesExpected);
 
                                     //HACK.
-                                    //Send file done cmdId to the update listener so it knows the picture is done. 
+                                    //Send file done cmdId to the update listener so it knows the picture is done.
                                     //hack.
                                     onUpdate(100);
                                     //hack.
@@ -648,7 +651,7 @@ namespace TelloLib
 
                         }
 
-                        //send command to listeners. 
+                        //send command to listeners.
                         try
                         {
                             //fire update event.
@@ -672,43 +675,42 @@ namespace TelloLib
                     }
                 }
             }, token);
-            //video server
-            var videoServer = new UdpListener(6038);
-            //var videoServer = new UdpListener(new IPEndPoint(IPAddress.Parse("192.168.10.2"), 6038));
 
-            Task.Factory.StartNew(async () => {
-                //Console.WriteLine("video:1");
-                var started = false;
+			//video server
+			if (useVideoServer) {
 
-                while (true)
-                {
-                    try
-                    {
-                        if (token.IsCancellationRequested)//handle canceling thread.
-                            break;
-                        var received = await videoServer.Receive();
-                        if (received.bytes[2] == 0 && received.bytes[3] == 0 && received.bytes[4] == 0 && received.bytes[5] == 1)//Wait for first NAL
-                        {
-                            var nal = (received.bytes[6] & 0x1f);
-                            //if (nal != 0x01 && nal!=0x07 && nal != 0x08 && nal != 0x05)
-                            //    Console.WriteLine("NAL type:" +nal);
-                            started = true;
-                        }
-                        if (started)
-                        {
-                            onVideoData(received.bytes);
-                        }
+				var videoServer = new UdpListener(6038);
+				//var videoServer = new UdpListener(new IPEndPoint(IPAddress.Parse("192.168.10.2"), 6038));
 
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine("Video receive thread error:" + ex.Message);
-                        
-                        //dont disconnect();
-//                        break;
-                    }
-                }
-            }, token);
+				Task.Factory.StartNew(async () => {
+					//Console.WriteLine("video:1");
+					var started = false;
+
+					while (true) {
+						try {
+							if (token.IsCancellationRequested)//handle canceling thread.
+								break;
+							var received = await videoServer.Receive();
+							if (received.bytes[2] == 0 && received.bytes[3] == 0 && received.bytes[4] == 0 && received.bytes[5] == 1)//Wait for first NAL
+							{
+								var nal = (received.bytes[6] & 0x1f);
+								//if (nal != 0x01 && nal!=0x07 && nal != 0x08 && nal != 0x05)
+								//    Console.WriteLine("NAL type:" +nal);
+								started = true;
+							}
+							if (started) {
+								onVideoData(received.bytes);
+							}
+
+						} catch (Exception ex) {
+							Console.WriteLine("Video receive thread error:" + ex.Message);
+
+							//dont disconnect();
+							//                        break;
+						}
+					}
+				}, token);
+			}
 
         }
 
@@ -765,8 +767,16 @@ namespace TelloLib
             }, token);
 
         }
+
+		public static void stopConnecting() {
+			masterCancelTokens.Cancel();
+		}
+
         public static void startConnecting()
         {
+			masterCancelTokens = new CancellationTokenSource();
+            CancellationToken token = masterCancelTokens.Token;
+
             //Thread to handle connecting.
             Task.Factory.StartNew(async () =>
             {
@@ -775,6 +785,9 @@ namespace TelloLib
                 {
                     try
                     {
+                        if (token.IsCancellationRequested)
+                            break;
+
                         switch (connectionState)
                         {
                             case ConnectionState.Disconnected:
@@ -782,7 +795,7 @@ namespace TelloLib
                                 lastMessageTime = DateTime.Now;
 
                                 startListeners();
-                                
+
                                 break;
                             case ConnectionState.Connecting:
                             case ConnectionState.Connected:
@@ -794,7 +807,7 @@ namespace TelloLib
                                 }
                                 break;
                             case ConnectionState.Paused:
-                                lastMessageTime = DateTime.Now;//reset timeout so we have time to recover if enabled. 
+                                lastMessageTime = DateTime.Now;//reset timeout so we have time to recover if enabled.
                                 break;
                         }
                         Thread.Sleep(500);
@@ -886,9 +899,9 @@ namespace TelloLib
             };
 
         //Create joystick packet from floating point axis.
-        //Center = 0.0. 
-        //Up/Right =1.0. 
-        //Down/Left=-1.0. 
+        //Center = 0.0.
+        //Up/Right =1.0.
+        //Down/Left=-1.0.
         private static byte[] createJoyPacket(float fRx, float fRy, float fLx, float fLy, float speed)
         {
             //template joy packet.
@@ -898,7 +911,7 @@ namespace TelloLib
             short axis2 = (short)(660.0F * fRy + 1024.0F);//RightY down =364 up =-364
             short axis3 = (short)(660.0F * fLy + 1024.0F);//LeftY down =364 up =-364
             short axis4 = (short)(660.0F * fLx + 1024.0F);//LeftX left =364 right =-364
-            short axis5 = (short)(660.0F * speed + 1024.0F);//Speed. 
+            short axis5 = (short)(660.0F * speed + 1024.0F);//Speed.
 
             if (speed > 0.1f)
                 axis5 = 0x7fff;
@@ -911,7 +924,7 @@ namespace TelloLib
             packet[13] = ((byte)(int)(packedAxis >> 32 & 0xFF));
             packet[14] = ((byte)(int)(packedAxis >> 40 & 0xFF));
 
-            //Add time info.		
+            //Add time info.
             var now = DateTime.Now;
             packet[15] = (byte)now.Hour;
             packet[16] = (byte)now.Minute;
@@ -921,7 +934,7 @@ namespace TelloLib
 
             CRC.calcUCRC(packet, 4);//Not really needed.
 
-            //calc crc for packet. 
+            //calc crc for packet.
             CRC.calcCrc(packet, packet.Length);
 
             return packet;
@@ -1046,7 +1059,7 @@ namespace TelloLib
             //Parse some of the interesting info from the tello log stream
             public void parseLog(byte[] data)
             {
-                int pos = 0; 
+                int pos = 0;
 
                 //A packet can contain more than one record.
                 while (pos < data.Length-2)//-2 for CRC bytes at end of packet.
@@ -1205,4 +1218,3 @@ namespace TelloLib
 
     }
 }
- 
