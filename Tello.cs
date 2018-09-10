@@ -45,7 +45,7 @@ namespace TelloLib
         private static CancellationTokenSource cancelTokens = new CancellationTokenSource();//used to cancel listeners
 
 		private static CancellationTokenSource masterCancelTokens = new CancellationTokenSource();
-		private static bool useVideoServer = false;
+		private static bool useVideoServer = true;
 
         public static void takeOff()
         {
@@ -448,6 +448,8 @@ namespace TelloLib
         private static UInt32 picExtraPackets;
         public static bool picDownloading;
         private static int maxPieceNum = 0;
+		private static UdpListener videoServer;
+
         private static void startListeners()
         {
             cancelTokens = new CancellationTokenSource();
@@ -679,7 +681,8 @@ namespace TelloLib
 			//video server
 			if (useVideoServer) {
 
-				var videoServer = new UdpListener(6038);
+				if (videoServer == null)
+					videoServer = new UdpListener(6038);
 				//var videoServer = new UdpListener(new IPEndPoint(IPAddress.Parse("192.168.10.2"), 6038));
 
 				Task.Factory.StartNew(async () => {
@@ -785,8 +788,12 @@ namespace TelloLib
                 {
                     try
                     {
-                        if (token.IsCancellationRequested)
-                            break;
+                        if (token.IsCancellationRequested) {
+							if (cancelTokens != null)
+								cancelTokens.Cancel();
+							break;
+
+						}
 
                         switch (connectionState)
                         {
